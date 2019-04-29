@@ -1,0 +1,6 @@
+intel-tensorflow
+opencv-python
+Flask
+easydict
+tqdm
+glog
