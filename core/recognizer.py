@@ -1,102 +1,72 @@
-import os
-import logging
-import tensorflow as tf
-from PIL import Image
-from google.protobuf import text_format
+import cv2
 import numpy as np
+import tensorflow as tf
 
-from aster.protos import pipeline_pb2
-from aster.builders import model_builder
+from CRNN import config
+from CRNN.models import crnn_net
+from CRNN import tf_io_pipline_fast_tools
+
+CFG = config.cfg
+
 
 class Recognizer(object):
 
     def __init__(self, model):
-        pass
+        tf.reset_default_graph()
+
+        self.width = 100
+        self.height = 32
+
+        self.inputdata = tf.placeholder(
+            dtype=tf.float32,
+            shape=[1, self.height, self.width, CFG.ARCH.INPUT_CHANNELS],
+            name='input'
+        )
+
+        self.codec = tf_io_pipline_fast_tools.CrnnFeatureReader(
+            char_dict_path="char_dict_en.json",
+            ord_map_dict_path="ord_map_en.json"
+        )
+
+        net = crnn_net.ShadowNet(
+            phase='test',
+            hidden_nums=CFG.ARCH.HIDDEN_UNITS,
+            layers_nums=CFG.ARCH.HIDDEN_LAYERS,
+            num_classes=CFG.ARCH.NUM_CLASSES
+        )
+
+        inference_ret = net.inference(
+            inputdata=self.inputdata,
+            name='shadow_net',
+            reuse=False
+        )
+
+        self.decodes, _ = tf.nn.ctc_beam_search_decoder(
+            inputs=inference_ret,
+            sequence_length=int(self.width / 4) * np.ones(1),
+            merge_repeated=False,
+            beam_width=10
+        )
+
+        # config tf saver
+        saver = tf.train.Saver()
+
+        # config tf session
+        sess_config = tf.ConfigProto(allow_soft_placement=True, intra_op_parallelism_threads=4,
+                                     inter_op_parallelism_threads=4)
+        sess_config.gpu_options.per_process_gpu_memory_fraction = CFG.TEST.GPU_MEMORY_FRACTION
+        sess_config.gpu_options.allow_growth = CFG.TEST.TF_ALLOW_GROWTH
+
+        self.sess = tf.Session(config=sess_config)
+        saver.restore(sess=self.sess, save_path=model)
 
     def recognize(self, img):
-        pass
+        #image = cv2.imread(img, cv2.IMREAD_COLOR)
+        image = cv2.resize(img, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
+        image = np.array(image, np.float32) / 127.5 - 1.0
+
+        preds = self.sess.run(self.decodes, feed_dict={self.inputdata: [image]})
+
+        return self.codec.sparse_tensor_to_str(preds[0])[0]
 
 
-# supress TF logging duplicates
-logging.getLogger('tensorflow').propagate = False
-tf.logging.set_verbosity(tf.logging.INFO)
-logging.basicConfig(level=logging.INFO)
-
-flags = tf.app.flags
-flags.DEFINE_string('exp_dir', 'aster/experiments/demo/',
-                    'Directory containing config, training log and evaluations')
-flags.DEFINE_string('input_image', 'aster/data/demo.jpg', 'Demo image')
-FLAGS = flags.FLAGS
-
-
-def get_configs_from_exp_dir():
-    pipeline_config_path = os.path.join(FLAGS.exp_dir, 'config/trainval.prototxt')
-
-    pipeline_config = pipeline_pb2.TrainEvalPipelineConfig()
-    with tf.gfile.GFile(pipeline_config_path, 'r') as f:
-        text_format.Merge(f.read(), pipeline_config)
-
-    model_config = pipeline_config.model
-    eval_config = pipeline_config.eval_config
-    input_config = pipeline_config.eval_input_reader
-
-    return model_config, eval_config, input_config
-
-
-def main(_):
-    checkpoint_dir = os.path.join(FLAGS.exp_dir, 'log')
-    # eval_dir = os.path.join(FLAGS.exp_dir, 'log/eval')
-    model_config, _, _ = get_configs_from_exp_dir()
-
-    model = model_builder.build(model_config, is_training=False)
-
-    input_image_str_tensor = tf.placeholder(
-        dtype=tf.string,
-        shape=[])
-    input_image_tensor = tf.image.decode_jpeg(
-        input_image_str_tensor,
-        channels=3,
-    )
-    resized_image_tensor = tf.image.resize_images(
-        tf.to_float(input_image_tensor),
-        [64, 256])
-
-    predictions_dict = model.predict(tf.expand_dims(resized_image_tensor, 0))
-    recognitions = model.postprocess(predictions_dict)
-    recognition_text = recognitions['text'][0]
-    control_points = predictions_dict['control_points'],
-    rectified_images = predictions_dict['rectified_images']
-
-    saver = tf.train.Saver(tf.global_variables())
-    checkpoint = os.path.join(FLAGS.exp_dir, 'log/model.ckpt')
-
-    fetches = {
-        'original_image': input_image_tensor,
-        'recognition_text': recognition_text,
-        'control_points': predictions_dict['control_points'],
-        'rectified_images': predictions_dict['rectified_images'],
-    }
-
-    with open(FLAGS.input_image, 'rb') as f:
-        input_image_str = f.read()
-
-    with tf.Session() as sess:
-        sess.run([
-            tf.global_variables_initializer(),
-            tf.local_variables_initializer(),
-            tf.tables_initializer()])
-        saver.restore(sess, checkpoint)
-        sess_outputs = sess.run(fetches, feed_dict={input_image_str_tensor: input_image_str})
-
-    print('Recognized text: {}'.format(sess_outputs['recognition_text'].decode('utf-8')))
-
-    rectified_image = sess_outputs['rectified_images'][0]
-    rectified_image_pil = Image.fromarray((128 * (rectified_image + 1.0)).astype(np.uint8))
-    input_image_dir = os.path.dirname(FLAGS.input_image)
-    rectified_image_save_path = os.path.join(input_image_dir, 'rectified_image.jpg')
-    rectified_image_pil.save(rectified_image_save_path)
-    print('Rectified image saved to {}'.format(rectified_image_save_path))
-
-
-if __name__ == '__main__':
-    tf.app.run()

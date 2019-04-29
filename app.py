@@ -6,7 +6,7 @@ import numpy as np
 from flask import Flask, request, render_template, send_from_directory
 
 from core.detector import Detector
-from core.crnn_recognizer import Recognizer
+from core.recognizer import Recognizer
 
 app = Flask(__name__)
 
